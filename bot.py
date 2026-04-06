@@ -3,23 +3,24 @@ import requests
 import random
 import time
 import socket
-import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Токен из переменной окружения Railway
+# Токен бота из переменной окружения (Railway → Variables → BOT_TOKEN)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Источник прокси
 URL_LIST = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt"
 
 # Кэш на 12 часов
-CACHE_TTL = 43200
-CACHE = {"proxies": [], "timestamp": 0}
+CACHE_TTL = 43200  # 12 часов
+CACHE = {
+    "proxies": [],
+    "timestamp": 0,
+}
 
 REQUESTS_TIMEOUT = 10
-SOCKET_TIMEOUT = 3
 
 
 # -----------------------------
@@ -34,7 +35,6 @@ def fetch_proxies():
         proxies = []
 
         for line in lines:
-
             # Формат 1: tg://proxy
             if line.startswith("tg://proxy"):
                 proxies.append(line)
@@ -47,53 +47,34 @@ def fetch_proxies():
                 continue
 
         return proxies
-
     except Exception:
         return []
 
 
 # -----------------------------
-# АСИНХРОННАЯ ПРОВЕРКА ДОСТУПНОСТИ
+# DNS-ФИЛЬТРАЦИЯ (ПРОВЕРКА, ЧТО ДОМЕН ЖИВОЙ)
 # -----------------------------
-async def check_proxy(server, port=443, timeout=SOCKET_TIMEOUT):
+def dns_alive(server: str) -> bool:
     try:
-        await asyncio.wait_for(asyncio.open_connection(server, port), timeout=timeout)
+        socket.gethostbyname(server)
         return True
-    except:
+    except Exception:
         return False
 
 
-async def filter_alive(proxies):
-    tasks = []
-    servers = []
-
-    for p in proxies:
-        try:
-            server = p.split("server=")[1].split("&")[0]
-            servers.append(server)
-            tasks.append(check_proxy(server))
-        except:
-            continue
-
-    if not tasks:
-        return proxies
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
+def filter_alive(proxies):
     alive = []
-    idx = 0
+
     for p in proxies:
         try:
             server = p.split("server=")[1].split("&")[0]
-        except:
+        except Exception:
             continue
 
-        if idx < len(results) and results[idx] is True:
+        if dns_alive(server):
             alive.append(p)
 
-        idx += 1
-
-    # fallback: если все "мертвые", отдаём весь список
+    # fallback: если после фильтрации пусто — отдаём весь список
     if not alive:
         alive = proxies
 
@@ -103,14 +84,19 @@ async def filter_alive(proxies):
 # -----------------------------
 # КЭШ
 # -----------------------------
-async def get_cached_proxies():
+def get_cached_proxies():
     now = time.time()
 
+    # если кэш ещё живой — возвращаем его
     if now - CACHE["timestamp"] < CACHE_TTL and CACHE["proxies"]:
         return CACHE["proxies"]
 
     proxies = fetch_proxies()
-    alive = await filter_alive(proxies)
+    if not proxies:
+        # если вообще ничего не скачали — возвращаем то, что было
+        return CACHE["proxies"]
+
+    alive = filter_alive(proxies)
 
     CACHE["proxies"] = alive
     CACHE["timestamp"] = now
@@ -137,17 +123,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    proxies = await get_cached_proxies()
+    proxies = get_cached_proxies()
 
     if not proxies:
         await query.edit_message_text("Нет доступных прокси.")
         return
 
     if query.data == "random":
-        await query.edit_message_text(random.choice(proxies))
+        p = random.choice(proxies)
+        await query.edit_message_text(p)
 
     elif query.data == "fast":
-        await query.edit_message_text(f"🔥 Быстрый прокси:\n{proxies[0]}")
+        p = proxies[0]
+        await query.edit_message_text(f"🔥 Быстрый прокси:\n{p}")
 
     elif query.data == "top10":
         top = proxies[:10]
