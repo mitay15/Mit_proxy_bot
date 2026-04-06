@@ -3,7 +3,7 @@ import requests
 import random
 import time
 import socket
-import traceback
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -14,11 +14,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # Источник прокси
 URL_LIST = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt"
 
-# Настройки
-CACHE_TTL = 43200  # 12 часов
-CACHE = {"proxies": [], "timestamp": 0, "last_error": None}
+# Кэш на 12 часов
+CACHE_TTL = 43200
+CACHE = {"proxies": [], "timestamp": 0}
 
-CHECK_ALIVE = True          # можно временно выключить для диагностики
 REQUESTS_TIMEOUT = 10
 SOCKET_TIMEOUT = 3
 
@@ -47,58 +46,76 @@ def fetch_proxies():
                 proxies.append(tg)
                 continue
 
-        return proxies, None
+        return proxies
 
-    except Exception as e:
-        return [], f"fetch_error: {repr(e)}"
-
-
-# -----------------------------
-# ПРОВЕРКА ДОСТУПНОСТИ
-# -----------------------------
-def is_alive(server, port=443, timeout=SOCKET_TIMEOUT):
-    try:
-        sock = socket.create_connection((server, port), timeout=timeout)
-        sock.close()
-        return True
     except Exception:
+        return []
+
+
+# -----------------------------
+# АСИНХРОННАЯ ПРОВЕРКА ДОСТУПНОСТИ
+# -----------------------------
+async def check_proxy(server, port=443, timeout=SOCKET_TIMEOUT):
+    try:
+        await asyncio.wait_for(asyncio.open_connection(server, port), timeout=timeout)
+        return True
+    except:
         return False
 
 
+async def filter_alive(proxies):
+    tasks = []
+    servers = []
+
+    for p in proxies:
+        try:
+            server = p.split("server=")[1].split("&")[0]
+            servers.append(server)
+            tasks.append(check_proxy(server))
+        except:
+            continue
+
+    if not tasks:
+        return proxies
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    alive = []
+    idx = 0
+    for p in proxies:
+        try:
+            server = p.split("server=")[1].split("&")[0]
+        except:
+            continue
+
+        if idx < len(results) and results[idx] is True:
+            alive.append(p)
+
+        idx += 1
+
+    # fallback: если все "мертвые", отдаём весь список
+    if not alive:
+        alive = proxies
+
+    return alive
+
+
 # -----------------------------
-# КЭШИРОВАНИЕ
+# КЭШ
 # -----------------------------
-def get_cached_proxies():
+async def get_cached_proxies():
     now = time.time()
 
-    # Если кэш свежий — возвращаем
     if now - CACHE["timestamp"] < CACHE_TTL and CACHE["proxies"]:
-        return CACHE["proxies"], CACHE["last_error"]
+        return CACHE["proxies"]
 
-    # Иначе обновляем
-    proxies, err = fetch_proxies()
-    alive = []
-
-    if proxies and CHECK_ALIVE:
-        for p in proxies:
-            try:
-                server = p.split("server=")[1].split("&")[0]
-            except Exception:
-                continue
-            if is_alive(server):
-                alive.append(p)
-    else:
-        alive = proxies.copy()
-
-    # Если после фильтрации пусто — используем весь список
-    if not alive and proxies:
-        alive = proxies.copy()
+    proxies = fetch_proxies()
+    alive = await filter_alive(proxies)
 
     CACHE["proxies"] = alive
     CACHE["timestamp"] = now
-    CACHE["last_error"] = err
 
-    return alive, err
+    return alive
 
 
 # -----------------------------
@@ -109,7 +126,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔥 Быстрый прокси", callback_data="fast")],
         [InlineKeyboardButton("🎲 Случайный", callback_data="random")],
         [InlineKeyboardButton("🏎️ Топ‑10", callback_data="top10")],
-        [InlineKeyboardButton("🛠️ Debug", callback_data="debug")],
     ]
     await update.message.reply_text(
         "Выбери действие:",
@@ -121,17 +137,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    try:
-        proxies, err = get_cached_proxies()
-    except Exception as e:
-        await query.edit_message_text(f"Ошибка при получении прокси: {e}")
-        return
+    proxies = await get_cached_proxies()
 
     if not proxies:
-        text = "Нет доступных прокси."
-        if err:
-            text += f"\nОшибка загрузки: {err}"
-        await query.edit_message_text(text)
+        await query.edit_message_text("Нет доступных прокси.")
         return
 
     if query.data == "random":
@@ -145,30 +154,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "🏎️ Топ‑10 прокси:\n\n" + "\n\n".join(top)
         await query.edit_message_text(text)
 
-    elif query.data == "debug":
-        raw, fetch_err = fetch_proxies()
-        alive, _ = get_cached_proxies()
-
-        text = (
-            f"Debug info:\n\n"
-            f"Всего raw: {len(raw)}\n"
-            f"Всего alive: {len(alive)}\n"
-            f"Последняя ошибка fetch: {fetch_err}\n\n"
-            f"Примеры raw:\n" + ("\n".join(raw[:5]) if raw else "— пусто") + "\n\n"
-            f"Примеры alive:\n" + ("\n".join(alive[:5]) if alive else "— пусто")
-        )
-        await query.edit_message_text(text)
-
-
-async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    proxies, err = get_cached_proxies()
-    text = (
-        f"Cached proxies: {len(proxies)}\n"
-        f"Last error: {err}\n"
-        f"Sample:\n" + ("\n".join(proxies[:5]) if proxies else "— пусто")
-    )
-    await update.message.reply_text(text)
-
 
 # -----------------------------
 # ЗАПУСК
@@ -179,7 +164,6 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CallbackQueryHandler(button))
     app.run_polling()
 
