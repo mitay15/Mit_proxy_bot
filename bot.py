@@ -6,7 +6,7 @@ import socket
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-BOT_TOKEN = "8766164066:AAFXi_NCGz3h_v_rpd-8c_85QlV_SpA91dQ"
+BOT_TOKEN = "8766164066:AAFXi_NCGz3h_v_rpd
 
 URL_LIST = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt"
 URL_SPEED = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/speedtest.json"
