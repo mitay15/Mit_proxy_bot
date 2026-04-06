@@ -21,7 +21,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")             # токен бота
 
 # Telegram‑каналы с прокси
 CHANNELS = [
-    "MTProxyList",
     "ProxyMTProto",
     "mtpro_xyz",
     "mtproxies"
