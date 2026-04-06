@@ -3,22 +3,17 @@ import requests
 import random
 import time
 import socket
+import asyncio
+import struct
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Токен бота из переменной окружения (Railway → Variables → BOT_TOKEN)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# Источник прокси
 URL_LIST = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt"
 
-# Кэш на 12 часов
-CACHE_TTL = 43200  # 12 часов
-CACHE = {
-    "proxies": [],
-    "timestamp": 0,
-}
+CACHE_TTL = 43200
+CACHE = {"proxies": [], "timestamp": 0}
 
 REQUESTS_TIMEOUT = 10
 
@@ -35,68 +30,123 @@ def fetch_proxies():
         proxies = []
 
         for line in lines:
-            # Формат 1: tg://proxy
             if line.startswith("tg://proxy"):
                 proxies.append(line)
                 continue
 
-            # Формат 2: https://t.me/proxy
             if line.startswith("https://t.me/proxy"):
                 tg = line.replace("https://t.me/", "tg://")
                 proxies.append(tg)
                 continue
 
         return proxies
-    except Exception:
+    except:
         return []
 
 
 # -----------------------------
-# DNS-ФИЛЬТРАЦИЯ (ПРОВЕРКА, ЧТО ДОМЕН ЖИВОЙ)
+# ВАЛИДАЦИЯ СЕКРЕТА
+# -----------------------------
+def valid_secret(secret: str) -> bool:
+    if len(secret) != 32:
+        return False
+    try:
+        int(secret, 16)
+        return True
+    except:
+        return False
+
+
+# -----------------------------
+# DNS-ПРОВЕРКА
 # -----------------------------
 def dns_alive(server: str) -> bool:
     try:
         socket.gethostbyname(server)
         return True
-    except Exception:
+    except:
         return False
 
 
-def filter_alive(proxies):
-    alive = []
+# -----------------------------
+# MTProto HANDSHAKE
+# -----------------------------
+async def mtproto_alive(server, port, secret):
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(server, port),
+            timeout=3
+        )
+
+        # MTProto handshake packet
+        # 0xef + random bytes + secret
+        packet = b"\xef" + os.urandom(15) + bytes.fromhex(secret)
+
+        writer.write(packet)
+        await writer.drain()
+
+        # ждём ответ
+        data = await asyncio.wait_for(reader.read(1), timeout=3)
+
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except:
+            pass
+
+        return len(data) > 0
+
+    except:
+        return False
+
+
+# -----------------------------
+# ПОЛНАЯ ФИЛЬТРАЦИЯ
+# -----------------------------
+async def filter_alive(proxies):
+    good = []
 
     for p in proxies:
         try:
             server = p.split("server=")[1].split("&")[0]
-        except Exception:
+            port = int(p.split("port=")[1].split("&")[0])
+            secret = p.split("secret=")[1]
+        except:
             continue
 
-        if dns_alive(server):
-            alive.append(p)
+        # 1. секрет должен быть валидным
+        if not valid_secret(secret):
+            continue
 
-    # fallback: если после фильтрации пусто — отдаём весь список
-    if not alive:
-        alive = proxies
+        # 2. DNS должен резолвиться
+        if not dns_alive(server):
+            continue
 
-    return alive
+        # 3. MTProto handshake
+        if await mtproto_alive(server, port, secret):
+            good.append(p)
+
+    # fallback
+    if not good:
+        good = proxies
+
+    return good
 
 
 # -----------------------------
 # КЭШ
 # -----------------------------
-def get_cached_proxies():
+async def get_cached_proxies():
     now = time.time()
 
-    # если кэш ещё живой — возвращаем его
     if now - CACHE["timestamp"] < CACHE_TTL and CACHE["proxies"]:
         return CACHE["proxies"]
 
     proxies = fetch_proxies()
     if not proxies:
-        # если вообще ничего не скачали — возвращаем то, что было
         return CACHE["proxies"]
 
-    alive = filter_alive(proxies)
+    alive = await filter_alive(proxies)
 
     CACHE["proxies"] = alive
     CACHE["timestamp"] = now
@@ -109,7 +159,7 @@ def get_cached_proxies():
 # -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🔥 Быстрый прокси", callback_data="fast")],
+        [InlineKeyboardButton("🔥 Рабочий прокси", callback_data="fast")],
         [InlineKeyboardButton("🎲 Случайный", callback_data="random")],
         [InlineKeyboardButton("🏎️ Топ‑10", callback_data="top10")],
     ]
@@ -123,23 +173,21 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    proxies = get_cached_proxies()
+    proxies = await get_cached_proxies()
 
     if not proxies:
         await query.edit_message_text("Нет доступных прокси.")
         return
 
     if query.data == "random":
-        p = random.choice(proxies)
-        await query.edit_message_text(p)
+        await query.edit_message_text(random.choice(proxies))
 
     elif query.data == "fast":
-        p = proxies[0]
-        await query.edit_message_text(f"🔥 Быстрый прокси:\n{p}")
+        await query.edit_message_text(f"🔥 Рабочий прокси:\n{proxies[0]}")
 
     elif query.data == "top10":
         top = proxies[:10]
-        text = "🏎️ Топ‑10 прокси:\n\n" + "\n\n".join(top)
+        text = "🏎️ Топ‑10 рабочих прокси:\n\n" + "\n\n".join(top)
         await query.edit_message_text(text)
 
 
@@ -148,7 +196,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------------
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("Переменная окружения BOT_TOKEN не установлена")
+        raise RuntimeError("BOT_TOKEN не установлен")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
