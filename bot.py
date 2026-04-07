@@ -4,11 +4,12 @@ import re
 import time
 import base64
 import json
-import time
-time.sleep(5)
 
 from aiogram import Bot, Dispatcher, executor, types
 from pyrogram import Client
+
+# Даем старому экземпляру время завершиться
+time.sleep(5)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID"))
@@ -167,10 +168,8 @@ async def fetch_proxies(app: Client):
 async def update_proxies():
     global PROXY_DATA
 
-    app = Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
-    await app.start()
-
-    proxies = await fetch_proxies(app)
+    async with Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING) as app:
+        proxies = await fetch_proxies(app)
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     tasks = [check_proxy(s, p, sec, sem) for s, p, sec in proxies]
@@ -184,7 +183,6 @@ async def update_proxies():
             "top10": [],
         }
         save_data()
-        await app.stop()
         return
 
     results.sort(key=lambda x: x[1])
@@ -205,7 +203,6 @@ async def update_proxies():
     }
 
     save_data()
-    await app.stop()
 
 
 async def updater_loop():
