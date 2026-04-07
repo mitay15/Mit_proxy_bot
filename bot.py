@@ -4,6 +4,8 @@ import re
 import time
 import base64
 import json
+import time
+time.sleep(5)
 
 from aiogram import Bot, Dispatcher, executor, types
 from pyrogram import Client
