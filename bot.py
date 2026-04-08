@@ -4,6 +4,7 @@ import re
 import time
 import base64
 import json
+import aiohttp
 
 from aiogram import Bot, Dispatcher, executor, types
 from pyrogram import Client
@@ -22,6 +23,7 @@ CHANNELS = ["ProxyMTProto", "MTProtoProxies"]
 MAX_CONCURRENT = 20
 TCP_TIMEOUT = 2
 MTP_TIMEOUT = 2
+SOCKS_TIMEOUT = 2
 
 DATA_FILE = "data.json"
 UPDATE_INTERVAL = 6 * 60 * 60  # 6 часов
@@ -31,8 +33,11 @@ dp = Dispatcher(bot)
 
 PROXY_DATA = {
     "updated": None,
-    "best": None,
-    "top10": [],
+    "best_mtproto": None,
+    "best_socks5": None,
+    "top10_mtproto": [],
+    "top10_socks5": [],
+    "bad": []
 }
 
 
@@ -51,7 +56,11 @@ def load_data():
             pass
 
 
-def parse_proxy(text: str):
+# -----------------------------
+#   ПАРСИНГ ПРОКСИ
+# -----------------------------
+
+def parse_mtproto(text: str):
     text = text.strip()
 
     if "tg://proxy" in text:
@@ -78,6 +87,46 @@ def parse_proxy(text: str):
 
     return None
 
+
+def parse_socks5(text: str):
+    text = text.strip()
+
+    # socks5://user:pass@ip:port
+    m = re.match(r"socks5://(.+?):(.+?)@(.+?):(\d+)", text)
+    if m:
+        return {
+            "ip": m.group(3),
+            "port": int(m.group(4)),
+            "user": m.group(1),
+            "pass": m.group(2)
+        }
+
+    # socks5://ip:port
+    m = re.match(r"socks5://(.+?):(\d+)", text)
+    if m:
+        return {
+            "ip": m.group(1),
+            "port": int(m.group(2)),
+            "user": None,
+            "pass": None
+        }
+
+    # ip:port
+    m = re.match(r"(\d+\.\d+\.\d+\.\d+):(\d+)", text)
+    if m:
+        return {
+            "ip": m.group(1),
+            "port": int(m.group(2)),
+            "user": None,
+            "pass": None
+        }
+
+    return None
+
+
+# -----------------------------
+#   ПРОВЕРКА ПРОКСИ
+# -----------------------------
 
 async def tcp_ping(server, port):
     start = time.time()
@@ -137,7 +186,31 @@ async def mtproto_handshake(server, port, secret):
         return None
 
 
-async def check_proxy(server, port, secret, sem):
+async def check_socks5(proxy, sem):
+    async with sem:
+        ip = proxy["ip"]
+        port = proxy["port"]
+
+        start = time.time()
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port),
+                timeout=SOCKS_TIMEOUT
+            )
+        except:
+            return None
+
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except:
+            pass
+
+        return int((time.time() - start) * 1000)
+
+
+async def check_mtproto(server, port, secret, sem):
     async with sem:
         tcp = await tcp_ping(server, port)
         if tcp is None:
@@ -147,10 +220,14 @@ async def check_proxy(server, port, secret, sem):
         if mtp is None:
             return None
 
-        return tcp, mtp, server, port, secret
+        return mtp
 
 
-async def fetch_proxies(app: Client):
+# -----------------------------
+#   СБОР ПРОКСИ
+# -----------------------------
+
+async def fetch_mtproto(app: Client):
     proxies = []
 
     for channel in CHANNELS:
@@ -158,49 +235,128 @@ async def fetch_proxies(app: Client):
             if not msg.text:
                 continue
 
-            parsed = parse_proxy(msg.text)
+            parsed = parse_mtproto(msg.text)
             if parsed:
                 proxies.append(parsed)
 
     return proxies
 
 
+async def fetch_socks5():
+    urls = [
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=2000&country=all"
+    ]
+
+    proxies = []
+
+    async with aiohttp.ClientSession() as session:
+        for url in urls:
+            try:
+                async with session.get(url, timeout=5) as resp:
+                    text = await resp.text()
+                    for line in text.splitlines():
+                        p = parse_socks5(line)
+                        if p:
+                            proxies.append(p)
+            except:
+                pass
+
+    return proxies
+
+
+# -----------------------------
+#   ОБНОВЛЕНИЕ ПРОКСИ
+# -----------------------------
+
 async def update_proxies():
     global PROXY_DATA
 
+    # MTProto
     async with Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING) as app:
-        proxies = await fetch_proxies(app)
+        mtproto_list = await fetch_mtproto(app)
+
+    # SOCKS5
+    socks_list = await fetch_socks5()
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
-    tasks = [check_proxy(s, p, sec, sem) for s, p, sec in proxies]
 
-    results = [r for r in await asyncio.gather(*tasks) if r]
-
-    if not results:
-        PROXY_DATA = {
-            "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "best": None,
-            "top10": [],
-        }
-        save_data()
-        return
-
-    results.sort(key=lambda x: x[1])
-
-    best = results[0]
-    top10 = results[:10]
-
-    best_link = f"tg://proxy?server={best[2]}&port={best[3]}&secret={best[4]}"
-    top_links = [
-        f"tg://proxy?server={srv}&port={prt}&secret={sec}"
-        for _, _, srv, prt, sec in top10
+    # Проверка MTProto
+    mt_tasks = [
+        check_mtproto(s, p, sec, sem)
+        for s, p, sec in mtproto_list
+        if f"{s}:{p}:{sec}" not in PROXY_DATA["bad"]
     ]
 
-    PROXY_DATA = {
-        "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "best": best_link,
-        "top10": top_links,
-    }
+    mt_results = await asyncio.gather(*mt_tasks)
+    mt_good = []
+
+    for (proxy, result) in zip(mtproto_list, mt_results):
+        if result:
+            mt_good.append((result, proxy))
+        else:
+            PROXY_DATA["bad"].append(f"{proxy[0]}:{proxy[1]}:{proxy[2]}")
+
+    mt_good.sort(key=lambda x: x[0])
+    top10_mtproto = mt_good[:10]
+
+    # Проверка SOCKS5
+    socks_tasks = [
+        check_socks5(p, sem)
+        for p in socks_list
+        if f"{p['ip']}:{p['port']}" not in PROXY_DATA["bad"]
+    ]
+
+    socks_results = await asyncio.gather(*socks_tasks)
+    socks_good = []
+
+    for (proxy, result) in zip(socks_list, socks_results):
+        if result:
+            socks_good.append((result, proxy))
+        else:
+            PROXY_DATA["bad"].append(f"{proxy['ip']}:{proxy['port']}")
+
+    socks_good.sort(key=lambda x: x[0])
+    top10_socks = socks_good[:10]
+
+    # Формирование ссылок
+    best_mtproto = None
+    if top10_mtproto:
+        _, (s, p, sec) = top10_mtproto[0]
+        best_mtproto = f"tg://proxy?server={s}&port={p}&secret={sec}"
+
+    best_socks = None
+    if top10_socks:
+        _, proxy = top10_socks[0]
+        ip = proxy["ip"]
+        port = proxy["port"]
+        user = proxy["user"]
+        pwd = proxy["pass"]
+
+        if user and pwd:
+            best_socks = f"tg://socks?server={ip}&port={port}&user={user}&pass={pwd}"
+        else:
+            best_socks = f"tg://socks?server={ip}&port={port}"
+
+    # Сохранение
+    PROXY_DATA["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    PROXY_DATA["best_mtproto"] = best_mtproto
+    PROXY_DATA["best_socks5"] = best_socks
+
+    PROXY_DATA["top10_mtproto"] = [
+        f"tg://proxy?server={s}&port={p}&secret={sec}"
+        for _, (s, p, sec) in top10_mtproto
+    ]
+
+    PROXY_DATA["top10_socks5"] = [
+        (
+            f"tg://socks?server={p['ip']}&port={p['port']}&user={p['user']}&pass={p['pass']}"
+            if p["user"] else
+            f"tg://socks?server={p['ip']}&port={p['port']}"
+        )
+        for _, p in top10_socks
+    ]
 
     save_data()
 
@@ -214,29 +370,31 @@ async def updater_loop():
         await update_proxies()
 
 
+# -----------------------------
+#   КОМАНДЫ БОТА
+# -----------------------------
+
 @dp.message_handler(commands=["start", "proxy"])
 async def send_proxies(message: types.Message):
-    if not PROXY_DATA["top10"]:
-        await message.answer("Пока нет сохранённых прокси. Подожди пару минут.")
-        return
-
     updated = PROXY_DATA["updated"]
-    best = PROXY_DATA["best"]
-    top10 = PROXY_DATA["top10"]
 
     text = f"🕒 Обновлено: <b>{updated}</b>\n\n"
-    text += "🔥 <b>Самый быстрый:</b>\n" + best + "\n\n"
-    text += "🏆 <b>Топ‑10:</b>\n"
-    for i, link in enumerate(top10, 1):
+
+    text += "🔥 <b>Лучший MTProto:</b>\n"
+    text += (PROXY_DATA["best_mtproto"] or "Нет рабочих") + "\n\n"
+
+    text += "🏆 <b>Топ‑10 MTProto:</b>\n"
+    for i, link in enumerate(PROXY_DATA["top10_mtproto"], 1):
+        text += f"{i}) {link}\n"
+
+    text += "\n🟦 <b>Лучший SOCKS5:</b>\n"
+    text += (PROXY_DATA["best_socks5"] or "Нет рабочих") + "\n\n"
+
+    text += "🟩 <b>Топ‑10 SOCKS5:</b>\n"
+    for i, link in enumerate(PROXY_DATA["top10_socks5"], 1):
         text += f"{i}) {link}\n"
 
     await message.answer(text)
-
-
-@dp.message_handler(commands=["info"])
-async def info(message: types.Message):
-    updated = PROXY_DATA["updated"]
-    await message.answer(f"🕒 Последнее обновление: <b>{updated}</b>")
 
 
 @dp.message_handler(commands=["force"])
