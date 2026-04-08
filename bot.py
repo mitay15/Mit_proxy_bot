@@ -9,6 +9,12 @@ import aiohttp
 from aiogram import Bot, Dispatcher, executor, types
 from pyrogram import Client
 
+if os.getenv("RAILWAY_ENVIRONMENT") == "production":
+    import psutil
+    count = len([p for p in psutil.process_iter(attrs=['cmdline']) if 'bot.py' in str(p.info['cmdline'])])
+    if count > 1:
+        print("⚠️ Another instance detected, exiting.")
+        exit(0)
 # Даем старому экземпляру время завершиться
 time.sleep(5)
 
