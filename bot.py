@@ -1,4 +1,3 @@
-print(">>> PYTHON STARTED, PID =", os.getpid())
 # --- START: debug single instance guard ---
 import socket, sys, os, subprocess, time
 
@@ -52,6 +51,7 @@ threading.Thread(target=start_ping_server, daemon=True).start()
 
 import asyncio
 import os
+print(">>> PYTHON STARTED, PID =", os.getpid())
 import sys
 import time
 import re
