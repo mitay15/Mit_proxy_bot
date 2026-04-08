@@ -1,3 +1,47 @@
+# --- START: debug single instance guard ---
+import socket, sys, os, subprocess, time
+
+LOCK_ADDR = ("127.0.0.1", 9999)
+
+def dump_debug_info(reason):
+    print("=== SINGLE INSTANCE GUARD ===")
+    print("Reason:", reason)
+    print("PID:", os.getpid())
+    try:
+        # ps aux (may be available)
+        out = subprocess.check_output(["ps", "aux"], stderr=subprocess.STDOUT, text=True)
+        print("--- ps aux ---")
+        print(out)
+    except Exception as e:
+        print("ps aux failed:", e)
+    try:
+        # show processes in /proc (if available)
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+        print("--- /proc PIDs count:", len(pids), "---")
+    except Exception as e:
+        print("/proc read failed:", e)
+    try:
+        print("--- ENV (selected) ---")
+        for k in ["RAILWAY_ENVIRONMENT","RAILWAY_SERVICE","RAILWAY_STATIC_URL","BOT_TOKEN","API_ID","OWNER_ID"]:
+            if k in os.environ:
+                print(f"{k}={os.environ[k]}")
+    except:
+        pass
+    print("=== END DEBUG ===")
+    sys.stdout.flush()
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(LOCK_ADDR)
+    s.listen(1)
+    print(f"Port lock acquired on {LOCK_ADDR[0]}:{LOCK_ADDR[1]}, PID={os.getpid()}")
+    sys.stdout.flush()
+except OSError:
+    dump_debug_info("port already bound — exiting")
+    sys.exit(0)
+# --- END: debug single instance guard ---
+
 import asyncio
 import os
 import sys
