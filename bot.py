@@ -8,25 +8,11 @@ def dump_debug_info(reason):
     print("Reason:", reason)
     print("PID:", os.getpid())
     try:
-        # ps aux (may be available)
         out = subprocess.check_output(["ps", "aux"], stderr=subprocess.STDOUT, text=True)
         print("--- ps aux ---")
         print(out)
     except Exception as e:
         print("ps aux failed:", e)
-    try:
-        # show processes in /proc (if available)
-        pids = [p for p in os.listdir("/proc") if p.isdigit()]
-        print("--- /proc PIDs count:", len(pids), "---")
-    except Exception as e:
-        print("/proc read failed:", e)
-    try:
-        print("--- ENV (selected) ---")
-        for k in ["RAILWAY_ENVIRONMENT","RAILWAY_SERVICE","RAILWAY_STATIC_URL","BOT_TOKEN","API_ID","OWNER_ID"]:
-            if k in os.environ:
-                print(f"{k}={os.environ[k]}")
-    except:
-        pass
     print("=== END DEBUG ===")
     sys.stdout.flush()
 
@@ -41,6 +27,27 @@ except OSError:
     dump_debug_info("port already bound — exiting")
     sys.exit(0)
 # --- END: debug single instance guard ---
+
+# --- START: tiny HTTP server for Railway healthcheck ---
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Ping(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_ping_server():
+    server = HTTPServer(("0.0.0.0", 8080), Ping)
+    server.serve_forever()
+
+threading.Thread(target=start_ping_server, daemon=True).start()
+# --- END: tiny HTTP server ---
+
+# --- YOUR BOT CODE STARTS HERE ---
+# (вставляй сюда свой bot.py, который я тебе дал ранее)
+# Полностью без изменений, кроме добавления этого блока сверху.
 
 import asyncio
 import os
