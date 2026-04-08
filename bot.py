@@ -51,7 +51,10 @@ threading.Thread(target=start_ping_server, daemon=True).start()
 
 import asyncio
 import os
+import os, subprocess
 print(">>> PYTHON STARTED, PID =", os.getpid())
+print(">>> PROCESS LIST:")
+print(subprocess.check_output(["ps", "aux"], text=True))
 import sys
 import time
 import re
