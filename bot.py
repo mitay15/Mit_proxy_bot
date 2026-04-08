@@ -1,3 +1,4 @@
+print(">>> PYTHON STARTED, PID =", os.getpid())
 # --- START: debug single instance guard ---
 import socket, sys, os, subprocess, time
 
