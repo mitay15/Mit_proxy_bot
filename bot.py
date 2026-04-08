@@ -6,6 +6,8 @@ import re
 import base64
 import json
 import aiohttp
+import socket
+import struct
 
 from aiogram import Bot, Dispatcher, executor, types
 from pyrogram import Client
@@ -39,10 +41,13 @@ CHANNELS = ["ProxyMTProto", "MTProtoProxies"]
 MAX_CONCURRENT = 20
 TCP_TIMEOUT = 2
 MTP_TIMEOUT = 2
-SOCKS_TIMEOUT = 2
+SOCKS_TIMEOUT = 3
 
 DATA_FILE = "data.json"
 UPDATE_INTERVAL = 6 * 60 * 60  # 6 часов
+
+TELEGRAM_DC_IP = "149.154.167.51"
+TELEGRAM_DC_PORT = 443
 
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot)
@@ -108,22 +113,78 @@ def parse_mtproto(text: str):
 def parse_socks5(text: str):
     text = text.strip()
 
-    m = re.match(r"socks5://(.+?):(.+?)@(.+?):(\d+)", text)
-    if m:
-        return {"ip": m.group(3), "port": int(m.group(4)), "user": m.group(1), "pass": m.group(2)}
-
     m = re.match(r"socks5://(.+?):(\d+)", text)
     if m:
-        return {"ip": m.group(1), "port": int(m.group(2)), "user": None, "pass": None}
+        return {"ip": m.group(1), "port": int(m.group(2))}
 
     m = re.match(r"(\d+\.\d+\.\d+\.\d+):(\d+)", text)
     if m:
-        return {"ip": m.group(1), "port": int(m.group(2)), "user": None, "pass": None}
+        return {"ip": m.group(1), "port": int(m.group(2))}
 
     return None
 
 # -----------------------------
-#   ПРОВЕРКА ПРОКСИ
+#   ПРОВЕРКА SOCKS5 (ЖЁСТКАЯ)
+# -----------------------------
+
+async def check_socks5_strict(proxy, sem):
+    async with sem:
+        ip = proxy["ip"]
+        port = proxy["port"]
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port),
+                timeout=SOCKS_TIMEOUT
+            )
+        except:
+            return None
+
+        try:
+            # Greeting
+            writer.write(b"\x05\x01\x00")
+            await writer.drain()
+            resp = await asyncio.wait_for(reader.read(2), timeout=SOCKS_TIMEOUT)
+            if resp != b"\x05\x00":
+                writer.close()
+                return None
+
+            # CONNECT → Telegram DC2
+            req = b"\x05\x01\x00\x01" + socket.inet_aton(TELEGRAM_DC_IP) + struct.pack(">H", TELEGRAM_DC_PORT)
+            writer.write(req)
+            await writer.drain()
+
+            resp = await asyncio.wait_for(reader.read(10), timeout=SOCKS_TIMEOUT)
+            if len(resp) < 2 or resp[1] != 0x00:
+                writer.close()
+                return None
+
+            # Теперь туннель открыт → отправляем MTProto handshake
+            start = time.time()
+
+            packet = b"\xef" + os.urandom(15)
+            writer.write(packet)
+            await writer.drain()
+
+            data = await asyncio.wait_for(reader.read(1), timeout=MTP_TIMEOUT)
+
+            writer.close()
+            await writer.wait_closed()
+
+            if not data:
+                return None
+
+            return int((time.time() - start) * 1000)
+
+        except:
+            try:
+                writer.close()
+            except:
+                pass
+            return None
+
+# -----------------------------
+#   ПРОВЕРКА MTProto
 # -----------------------------
 
 async def tcp_ping(server, port):
@@ -176,27 +237,6 @@ async def mtproto_handshake(server, port, secret):
 
     except:
         return None
-
-
-async def check_socks5(proxy, sem):
-    async with sem:
-        ip = proxy["ip"]
-        port = proxy["port"]
-
-        start = time.time()
-
-        try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=SOCKS_TIMEOUT)
-        except:
-            return None
-
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except:
-            pass
-
-        return int((time.time() - start) * 1000)
 
 
 async def check_mtproto(server, port, secret, sem):
@@ -286,9 +326,9 @@ async def update_proxies():
     mt_good.sort(key=lambda x: x[0])
     top10_mtproto = mt_good[:10]
 
-    # SOCKS5
+    # SOCKS5 (строгая проверка)
     socks_tasks = [
-        check_socks5(p, sem)
+        check_socks5_strict(p, sem)
         for p in socks_list
         if f"{p['ip']}:{p['port']}" not in PROXY_DATA["bad"]
     ]
@@ -316,13 +356,7 @@ async def update_proxies():
         _, proxy = top10_socks[0]
         ip = proxy["ip"]
         port = proxy["port"]
-        user = proxy["user"]
-        pwd = proxy["pass"]
-
-        if user and pwd:
-            best_socks = f"tg://socks?server={ip}&port={port}&user={user}&pass={pwd}"
-        else:
-            best_socks = f"tg://socks?server={ip}&port={port}"
+        best_socks = f"tg://socks?server={ip}&port={port}"
 
     PROXY_DATA["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     PROXY_DATA["best_mtproto"] = best_mtproto
@@ -334,11 +368,7 @@ async def update_proxies():
     ]
 
     PROXY_DATA["top10_socks5"] = [
-        (
-            f"tg://socks?server={p['ip']}&port={p['port']}&user={p['user']}&pass={p['pass']}"
-            if p["user"] else
-            f"tg://socks?server={p['ip']}&port={p['port']}"
-        )
+        f"tg://socks?server={p['ip']}&port={p['port']}"
         for _, p in top10_socks
     ]
 
