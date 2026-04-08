@@ -1,7 +1,8 @@
 import asyncio
 import os
-import re
+import sys
 import time
+import re
 import base64
 import json
 import aiohttp
@@ -9,13 +10,22 @@ import aiohttp
 from aiogram import Bot, Dispatcher, executor, types
 from pyrogram import Client
 
-if os.getenv("RAILWAY_ENVIRONMENT") == "production":
-    import psutil
-    count = len([p for p in psutil.process_iter(attrs=['cmdline']) if 'bot.py' in str(p.info['cmdline'])])
-    if count > 1:
-        print("⚠️ Another instance detected, exiting.")
-        exit(0)
-# Даем старому экземпляру время завершиться
+# -----------------------------
+#   ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА
+# -----------------------------
+LOCKFILE = "/tmp/bot.lock"
+
+if os.path.exists(LOCKFILE):
+    print("⚠️ Bot instance already running. Exiting.")
+    sys.exit(0)
+
+with open(LOCKFILE, "w") as f:
+    f.write("running")
+
+# -----------------------------
+#   НАСТРОЙКИ
+# -----------------------------
+
 time.sleep(5)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -46,11 +56,13 @@ PROXY_DATA = {
     "bad": []
 }
 
+# -----------------------------
+#   ФАЙЛЫ
+# -----------------------------
 
 def save_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(PROXY_DATA, f, ensure_ascii=False, indent=2)
-
 
 def load_data():
     global PROXY_DATA
@@ -60,7 +72,6 @@ def load_data():
                 PROXY_DATA = json.load(f)
         except:
             pass
-
 
 # -----------------------------
 #   ПАРСИНГ ПРОКСИ
@@ -97,38 +108,19 @@ def parse_mtproto(text: str):
 def parse_socks5(text: str):
     text = text.strip()
 
-    # socks5://user:pass@ip:port
     m = re.match(r"socks5://(.+?):(.+?)@(.+?):(\d+)", text)
     if m:
-        return {
-            "ip": m.group(3),
-            "port": int(m.group(4)),
-            "user": m.group(1),
-            "pass": m.group(2)
-        }
+        return {"ip": m.group(3), "port": int(m.group(4)), "user": m.group(1), "pass": m.group(2)}
 
-    # socks5://ip:port
     m = re.match(r"socks5://(.+?):(\d+)", text)
     if m:
-        return {
-            "ip": m.group(1),
-            "port": int(m.group(2)),
-            "user": None,
-            "pass": None
-        }
+        return {"ip": m.group(1), "port": int(m.group(2)), "user": None, "pass": None}
 
-    # ip:port
     m = re.match(r"(\d+\.\d+\.\d+\.\d+):(\d+)", text)
     if m:
-        return {
-            "ip": m.group(1),
-            "port": int(m.group(2)),
-            "user": None,
-            "pass": None
-        }
+        return {"ip": m.group(1), "port": int(m.group(2)), "user": None, "pass": None}
 
     return None
-
 
 # -----------------------------
 #   ПРОВЕРКА ПРОКСИ
@@ -137,10 +129,7 @@ def parse_socks5(text: str):
 async def tcp_ping(server, port):
     start = time.time()
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(server, port),
-            timeout=TCP_TIMEOUT
-        )
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(server, port), timeout=TCP_TIMEOUT)
     except:
         return None
 
@@ -157,10 +146,7 @@ async def mtproto_handshake(server, port, secret):
     start = time.time()
 
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(server, port),
-            timeout=MTP_TIMEOUT
-        )
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(server, port), timeout=MTP_TIMEOUT)
     except:
         return None
 
@@ -200,10 +186,7 @@ async def check_socks5(proxy, sem):
         start = time.time()
 
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(ip, port),
-                timeout=SOCKS_TIMEOUT
-            )
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=SOCKS_TIMEOUT)
         except:
             return None
 
@@ -227,7 +210,6 @@ async def check_mtproto(server, port, secret, sem):
             return None
 
         return mtp
-
 
 # -----------------------------
 #   СБОР ПРОКСИ
@@ -271,7 +253,6 @@ async def fetch_socks5():
 
     return proxies
 
-
 # -----------------------------
 #   ОБНОВЛЕНИЕ ПРОКСИ
 # -----------------------------
@@ -279,16 +260,14 @@ async def fetch_socks5():
 async def update_proxies():
     global PROXY_DATA
 
-    # MTProto
     async with Client("user_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING) as app:
         mtproto_list = await fetch_mtproto(app)
 
-    # SOCKS5
     socks_list = await fetch_socks5()
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    # Проверка MTProto
+    # MTProto
     mt_tasks = [
         check_mtproto(s, p, sec, sem)
         for s, p, sec in mtproto_list
@@ -307,7 +286,7 @@ async def update_proxies():
     mt_good.sort(key=lambda x: x[0])
     top10_mtproto = mt_good[:10]
 
-    # Проверка SOCKS5
+    # SOCKS5
     socks_tasks = [
         check_socks5(p, sem)
         for p in socks_list
@@ -345,7 +324,6 @@ async def update_proxies():
         else:
             best_socks = f"tg://socks?server={ip}&port={port}"
 
-    # Сохранение
     PROXY_DATA["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     PROXY_DATA["best_mtproto"] = best_mtproto
     PROXY_DATA["best_socks5"] = best_socks
@@ -366,6 +344,9 @@ async def update_proxies():
 
     save_data()
 
+# -----------------------------
+#   ЦИКЛ ОБНОВЛЕНИЯ
+# -----------------------------
 
 async def updater_loop():
     load_data()
@@ -374,7 +355,6 @@ async def updater_loop():
     while True:
         await asyncio.sleep(UPDATE_INTERVAL)
         await update_proxies()
-
 
 # -----------------------------
 #   КОМАНДЫ БОТА
